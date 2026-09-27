@@ -16,6 +16,18 @@ limits:
     ignition_timeout_s: 6.0
     zone_count: 6
     flame_min_temp_c: 660.0
+    zone_temp_min_c: 1100.0
+    zone_temp_max_c: 1600.0
+    zone_temp_jump_c: 60.0
+    zone_temp_deadband_c: 4.0
+    zone_temp_freeze_s: 30.0
+    zone_consensus_band_c: 45.0
+    heat_gain: 0.012
+    heat_integral_ki: 0.0015
+    heat_integral_cap_frac: 0.12
+    zone_heat_min_frac: 0.04
+    zone_heat_max_frac: 0.40
+    zone_heat_ramp_frac_per_s: 0.05
   forehearth:
     stable_band_c: 6.0
     stable_hold_s: 8.0

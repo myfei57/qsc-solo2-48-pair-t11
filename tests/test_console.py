@@ -121,6 +121,45 @@ def test_unknown_routes_are_reported(console):
     assert status == 404
 
 
+def test_zone_heat_endpoints_balance_and_flag_bad_probes(console):
+    _server, base = console
+    _post(f"{base}/api/start")
+    names = [f"zone-{i}" for i in range(1, 7)]
+    readings = {
+        zone: 1425.0 + (40.0 if zone == "zone-1" else -40.0 if zone == "zone-6" else 0.0)
+        for zone in names
+    }
+    status, payload = _post(
+        f"{base}/api/burner/zone-heat",
+        {"zone_temps_c": readings, "total_load": 0.8},
+    )
+    assert status == 200 and payload["ok"] is True
+    allocation = payload["result"]["allocation"]
+    assert allocation["mode"] == "auto"
+    assert allocation["total_flow_m3_h"] <= 0.8 * 620.0 + 1e-6
+
+    # 测点全坏：整窑退回均分并标注。
+    status, fallen = _post(
+        f"{base}/api/burner/zone-heat",
+        {"zone_temps_c": {zone: 9000.0 for zone in names}, "total_load": 0.7},
+    )
+    assert fallen["result"]["allocation"]["mode"] == "all_probes_bad"
+    assert all(
+        abs(z["fraction"] - 1 / 6) < 1e-3
+        for z in fallen["result"]["allocation"]["zones"]
+    )
+
+    # 手动均分 → 恢复自动。
+    status, held = _post(f"{base}/api/burner/equalize", {"total_load": 0.6})
+    assert held["result"]["mode"] == "manual_override"
+    status, resumed = _post(
+        f"{base}/api/burner/resume-heat",
+        {"zone_temps_c": readings, "total_load": 0.8},
+    )
+    assert resumed["ok"] is True
+    assert resumed["result"]["mode"] == "auto"
+
+
 def test_console_api_wraps_zone_and_calibration_actions(platform):
     api = ConsoleAPI(platform)
     rebuilt = api.rebuild_zone_map({"reason": "接口测试"})

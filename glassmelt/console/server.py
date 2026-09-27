@@ -109,6 +109,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(self.api.reset_lehr(payload))
             elif parsed.path == "/api/burner/trip":
                 self._send_json(self.api.trip_burner(payload))
+            elif parsed.path == "/api/burner/zone-heat":
+                self._send_json(self.api.zone_heat(payload))
+            elif parsed.path == "/api/burner/equalize":
+                self._send_json(self.api.equalize(payload))
+            elif parsed.path == "/api/burner/resume-heat":
+                self._send_json(self.api.resume_zone_heat(payload))
+            elif parsed.path == "/api/burner/setpoints":
+                self._send_json(self.api.set_zone_setpoints(payload))
             elif parsed.path == "/api/furnace/rebuild":
                 self._send_json(self.api.rebuild_zone_map(payload))
             elif parsed.path == "/api/furnace/clear":

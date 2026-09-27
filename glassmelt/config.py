@@ -92,13 +92,29 @@ class FurnaceLimits:
 
 @dataclass(frozen=True)
 class BurnerLimits:
-    """燃烧器与分区燃烧约束。"""
+    """燃烧器与分区燃烧约束。
+
+    分区火力闭环只在这些约束内动作：总热负荷按燃气上限折算成硬预算，每区
+    出力有上下限与逐拍爬坡限速；测点可信度判定用同一组量程与跳变阈值。
+    """
 
     air_min_flow_m3_h: float
     gas_max_m3_h: float
     ignition_timeout_s: float
     zone_count: int
     flame_min_temp_c: float
+    zone_temp_min_c: float
+    zone_temp_max_c: float
+    zone_temp_jump_c: float
+    zone_temp_deadband_c: float
+    zone_temp_freeze_s: float
+    zone_consensus_band_c: float
+    heat_gain: float
+    heat_integral_ki: float
+    heat_integral_cap_frac: float
+    zone_heat_min_frac: float
+    zone_heat_max_frac: float
+    zone_heat_ramp_frac_per_s: float
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "BurnerLimits":
@@ -108,11 +124,51 @@ class BurnerLimits:
             ignition_timeout_s=_number(section, "ignition_timeout_s", minimum=0.1),
             zone_count=int(_number(section, "zone_count", minimum=1.0)),
             flame_min_temp_c=_number(section, "flame_min_temp_c"),
+            zone_temp_min_c=_number(section, "zone_temp_min_c"),
+            zone_temp_max_c=_number(section, "zone_temp_max_c"),
+            zone_temp_jump_c=_number(section, "zone_temp_jump_c", minimum=0.0),
+            zone_temp_deadband_c=_number(section, "zone_temp_deadband_c", minimum=0.0),
+            zone_temp_freeze_s=_number(section, "zone_temp_freeze_s", minimum=0.0),
+            zone_consensus_band_c=_number(section, "zone_consensus_band_c", minimum=0.0),
+            heat_gain=_number(section, "heat_gain", minimum=0.0),
+            heat_integral_ki=_number(section, "heat_integral_ki", minimum=0.0),
+            heat_integral_cap_frac=_number(
+                section, "heat_integral_cap_frac", minimum=0.0
+            ),
+            zone_heat_min_frac=_number(
+                section, "zone_heat_min_frac", minimum=0.0
+            ),
+            zone_heat_max_frac=_number(
+                section, "zone_heat_max_frac", minimum=0.0
+            ),
+            zone_heat_ramp_frac_per_s=_number(
+                section, "zone_heat_ramp_frac_per_s", minimum=0.0
+            ),
         )
         if limits.air_min_flow_m3_h <= 0:
             raise ConfigError("助燃风最小流量必须为正", component="config")
         if limits.gas_max_m3_h <= 0:
             raise ConfigError("燃气上限必须为正", component="config")
+        if not limits.zone_temp_min_c < limits.zone_temp_max_c:
+            raise ConfigError("分区测温必须满足 下限 < 上限", component="config")
+        if limits.zone_temp_jump_c <= 0:
+            raise ConfigError("分区测温跳变速限必须为正", component="config")
+        if limits.zone_temp_freeze_s <= 0:
+            raise ConfigError("分区测温卡死判定时长必须为正", component="config")
+        if not 0.0 <= limits.zone_heat_min_frac < limits.zone_heat_max_frac:
+            raise ConfigError(
+                "分区火力必须满足 0 <= 下限 < 上限（份额）", component="config"
+            )
+        if limits.zone_heat_max_frac > 1.0:
+            raise ConfigError("分区火力上限份额不得大于 1", component="config")
+        if limits.zone_heat_min_frac * limits.zone_count > 1.0 + 1e-9:
+            raise ConfigError(
+                "各分区火力下限之和不得超过总热负荷", component="config"
+            )
+        if limits.zone_heat_ramp_frac_per_s <= 0:
+            raise ConfigError("分区火力爬坡限速必须为正", component="config")
+        if limits.heat_integral_cap_frac < 0.0:
+            raise ConfigError("积分限幅份额不得为负", component="config")
         return limits
 
     def air_ok(self, flow_m3_h: float) -> bool:
@@ -124,6 +180,11 @@ class BurnerLimits:
         """测得的火焰温度是否达到判燃下限。"""
 
         return float(temperature_c) >= self.flame_min_temp_c
+
+    def zone_temp_ok(self, temperature_c: float) -> bool:
+        """分区测点温度是否在可信量程内。"""
+
+        return self.zone_temp_min_c <= float(temperature_c) <= self.zone_temp_max_c
 
     def zone_names(self) -> tuple[str, ...]:
         """按分区数生成稳定的分区名。"""
@@ -413,6 +474,18 @@ def default_config() -> PlatformConfig:
             ignition_timeout_s=6.0,
             zone_count=6,
             flame_min_temp_c=660.0,
+            zone_temp_min_c=1100.0,
+            zone_temp_max_c=1600.0,
+            zone_temp_jump_c=60.0,
+            zone_temp_deadband_c=4.0,
+            zone_temp_freeze_s=30.0,
+            zone_consensus_band_c=45.0,
+            heat_gain=0.012,
+            heat_integral_ki=0.0015,
+            heat_integral_cap_frac=0.12,
+            zone_heat_min_frac=0.04,
+            zone_heat_max_frac=0.40,
+            zone_heat_ramp_frac_per_s=0.05,
         ),
         forehearth=ForehearthLimits(
             stable_band_c=6.0,
@@ -479,6 +552,18 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "ignition_timeout_s": cfg.burner.ignition_timeout_s,
                 "zone_count": cfg.burner.zone_count,
                 "flame_min_temp_c": cfg.burner.flame_min_temp_c,
+                "zone_temp_min_c": cfg.burner.zone_temp_min_c,
+                "zone_temp_max_c": cfg.burner.zone_temp_max_c,
+                "zone_temp_jump_c": cfg.burner.zone_temp_jump_c,
+                "zone_temp_deadband_c": cfg.burner.zone_temp_deadband_c,
+                "zone_temp_freeze_s": cfg.burner.zone_temp_freeze_s,
+                "zone_consensus_band_c": cfg.burner.zone_consensus_band_c,
+                "heat_gain": cfg.burner.heat_gain,
+                "heat_integral_ki": cfg.burner.heat_integral_ki,
+                "heat_integral_cap_frac": cfg.burner.heat_integral_cap_frac,
+                "zone_heat_min_frac": cfg.burner.zone_heat_min_frac,
+                "zone_heat_max_frac": cfg.burner.zone_heat_max_frac,
+                "zone_heat_ramp_frac_per_s": cfg.burner.zone_heat_ramp_frac_per_s,
             },
             "forehearth": {
                 "stable_band_c": cfg.forehearth.stable_band_c,

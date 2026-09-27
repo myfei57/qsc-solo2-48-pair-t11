@@ -18,7 +18,9 @@ from .batch.charge import Charger
 from .batch.scale import BatchScale
 from .burner.air import CombustionAir
 from .burner.draft import air_closed_before_draft_stop, close_combustion_air
+from .burner.heat import HeatAllocation, HeatAllocator
 from .burner.ignite import IgnitionUnit
+from .burner.probe import ZoneProbes
 from .burner.zone import ZoneMap
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
@@ -100,19 +102,28 @@ TOPOLOGY_RULES: tuple[tuple[str, str], ...] = (
 
 @dataclass(frozen=True)
 class CycleInputs:
-    """一个控制周期的工况输入。"""
+    """一个控制周期的工况输入。
+
+    ``zone_temps_c`` 给定时按真实分区测点读数结算火力；缺省时由内置窑温模型
+    按总负荷与上一拍各区出力推算断面温度，用于演示与巡检。
+    """
 
     load: float
     pull_rate: float
     gob_mass_g: float
     dt: float
+    zone_temps_c: dict | None = None
 
     def clamped(self) -> "CycleInputs":
+        readings = self.zone_temps_c
+        if readings is not None and not isinstance(readings, dict):
+            raise SequenceError("分区测点读数必须是 zone -> 温度 的映射", component="burner")
         return CycleInputs(
             load=max(0.0, min(1.0, float(self.load))),
             pull_rate=max(0.0, min(2.0, float(self.pull_rate))),
             gob_mass_g=max(1.0, float(self.gob_mass_g)),
             dt=max(0.001, float(self.dt)),
+            zone_temps_c=dict(readings) if readings is not None else None,
         )
 
 
@@ -146,6 +157,15 @@ class Platform:
         self.air = CombustionAir(self.clock, self.bus, self.config.burner)
         self.igniter = IgnitionUnit(self.bus, self.air, self.gas, self.config.burner)
         self.zones = ZoneMap(self.bus, self.config.burner)
+        self.zone_probes = ZoneProbes(
+            self.bus, self.config.burner, self.config.furnace.melt_temp_target_c
+        )
+        self.heat = HeatAllocator(
+            self.bus,
+            self.config.burner,
+            self.zone_probes,
+            self.config.furnace.melt_temp_target_c,
+        )
 
         self.scale = BatchScale(self.bus, store, self.config.batch)
         self.charger = Charger(self.bus, self.config.batch)
@@ -190,6 +210,8 @@ class Platform:
             ("burner", "air", "combustion-air-fan"),
             ("burner", "gas", "gas-control-valve"),
             ("burner", "zone", "zone-burner"),
+            ("burner", "zone_probe", "zone-thermocouple"),
+            ("burner", "zone_heat", "zone-heat-allocator"),
             ("forehearth", "steady", "forehearth-heater"),
             ("forehearth", "gate", "forehearth-gate"),
             ("temp", "anneal", "anneal-thermocouple"),
@@ -323,6 +345,15 @@ class Platform:
                 self.igniter.reignite(melt_c + 30.0, "窑温回落")
             self.furnace_temp.observe(melt_c)
 
+            zone_temps = (
+                state.zone_temps_c
+                if state.zone_temps_c is not None
+                else self._model_zone_temps(state.load, state.dt)
+            )
+            heat = self.heat.allocate(
+                zone_temps, state.load, state.dt, moment
+            )
+
             self.level.drift(-7.0 * state.pull_rate - 1.0 * state.dt)
             charge_kg = 0.0
             if self.level.snapshot()["level_ok"]:
@@ -351,12 +382,15 @@ class Platform:
             self.trend.append("gob_mass_g", moment, gob.mass_g)
             self.trend.append("belt_speed", moment, anneal["belt"]["speed_m_per_min"])
             self.trend.append("heater_power_pct", moment, anneal["heater"]["power_pct"])
+            self.trend.append("zone_heat_flow", moment, heat.total_flow_m3_h)
+            self.trend.append("zone_section_spread", moment, heat.section_spread_c)
 
             return {
                 "cycle": self._cycles,
                 "dt": state.dt,
                 "load": round(state.load, 4),
                 "melt_temp_c": round(self.furnace_temp.temperature_c, 3),
+                "heat": heat.as_dict(),
                 "level": self.level.snapshot(),
                 "charge": {
                     "charged_kg": round(charge_kg, 3),
@@ -371,6 +405,39 @@ class Platform:
                 "anneal": anneal,
                 "zones": self.zones.snapshot(),
             }
+
+    def _model_zone_temps(self, load: float, dt: float) -> dict:
+        """无真实测点输入时，按总负荷与上一拍各区出力推算断面温度。
+
+        只用于演示/巡检：这是个一阶惯性的虚拟窑炉。稳态温度 = 目标值 +
+        负荷温升 + 窑体固有偏置 + 火力再分配增益 × 该区相对均分的份额，
+        即火力多的区稳态温度高、火力少的区低（负反馈）。每拍向稳态温度
+        靠近固定比例，模拟窑体热容。真实运行时由测点读数覆盖。
+        """
+
+        target = self.furnace_temp.target_c
+        names = self.config.burner.zone_names()
+        count = len(names)
+        gain = 600.0  # 份额偏差（±1）对应的稳态断面温差，℃
+        inertia = min(1.0, 0.25 * max(0.001, dt))
+        flows = self.heat.flows()
+        if not flows:
+            # 首拍还没有上一拍出力：只体现负荷温升与窑体固有偏置。
+            return {
+                zone: target + 10.0 * load + (7.5 - 3.0 * index)
+                for index, zone in enumerate(names)
+            }
+        total = sum(flows.values())
+        equal = total / count
+        result = {}
+        for index, zone in enumerate(names):
+            share_dev = (flows.get(zone, equal) - equal) / max(1e-6, total)
+            steady = (
+                target + 10.0 * load + (7.5 - 3.0 * index) + gain * share_dev
+            )
+            previous = self.zone_probes.reading_value(zone)
+            result[zone] = previous + (steady - previous) * inertia
+        return result
 
     def evaluate_anneal(self, temperature_c: float) -> dict:
         """按退火温度结算告警、闩锁、网带、加热器与段温。"""
@@ -496,6 +563,58 @@ class Platform:
             revision = self.zones.rebuild(assignments, reason)
             return {"revision": revision, "zones": self.zones.describe()}
 
+    def allocate_zone_heat(
+        self, readings: dict, total_load: float = 0.8, dt: float = 1.0
+    ) -> dict:
+        """按分区测点温度反馈分配火力，返回本拍分配结果。
+
+        总负荷由操作员给定（0~1，相对燃气上限），分配器只在该预算内做分区
+        再分配；测点不可信的分区自动退回均分份额。
+        """
+
+        with self._lock:
+            allocation = self.heat.allocate(
+                readings, total_load, dt, self.clock.now()
+            )
+            return {
+                "allocation": allocation.as_dict(),
+                "trusted_temperatures": {
+                    zone: round(value, 2)
+                    for zone, value in self.zone_probes.trusted_temperatures().items()
+                },
+                "all_zones_trusted": all(
+                    self.zone_probes.is_trusted(zone)
+                    for zone in self.config.burner.zone_names()
+                ),
+            }
+
+    def equalize_zone_heat(self, total_load: float, reason: str = "手动均分") -> dict:
+        """操作员手动退回全窑均分（测点检修、坏点过多时用）。"""
+
+        with self._lock:
+            allocation = self.heat.force_equal_share(
+                total_load, 1.0, self.clock.now(), reason
+            )
+            return allocation.as_dict()
+
+    def resume_zone_heat(
+        self, readings: dict, total_load: float = 0.8, dt: float = 1.0
+    ) -> dict:
+        """退出手动均分，按送来的测点读数恢复分区自动闭环。"""
+
+        with self._lock:
+            allocation = self.heat.resume_auto(
+                readings, total_load, dt, self.clock.now()
+            )
+            return allocation.as_dict()
+
+    def set_zone_setpoints(self, setpoints: dict) -> dict:
+        """下装各分区目标温度，必须覆盖全部分区。"""
+
+        with self._lock:
+            self.heat.set_setpoints(setpoints)
+            return {"setpoints_c": self.heat.snapshot()["setpoints_c"]}
+
     def trip_burner(self, zone: str, reason: str = "窑温越限") -> dict:
         """跳闸联动：按当前分区映射关断对应燃烧器。"""
 
@@ -582,6 +701,8 @@ class Platform:
             "melt_temp_ok": self.furnace_temp.is_ok(),
             "melt_temp_low": self.furnace_temp.is_low(),
             "ignition": self.igniter.snapshot(),
+            "zone_probes": self.zone_probes.snapshot(),
+            "zone_heat": self.heat.snapshot(),
             "stability": stability.as_dict() if stability else None,
             "gate": self.gate.snapshot(),
             "forehearth_above_gate_min": self.forehearth_temp.is_above_gate_min(),
@@ -632,6 +753,10 @@ class Platform:
                 "/api/batch/start",
                 "/api/burner/ignite",
                 "/api/burner/trip",
+                "/api/burner/zone-heat",
+                "/api/burner/equalize",
+                "/api/burner/resume-heat",
+                "/api/burner/setpoints",
                 "/api/forehearth/gate",
                 "/api/mold/blow",
                 "/api/lehr/reset",
@@ -675,6 +800,8 @@ class Platform:
             "air": self.air.snapshot(),
             "ignition": self.igniter.snapshot(),
             "zones": self.zones.snapshot(),
+            "zone_probes": self.zone_probes.snapshot(),
+            "zone_heat": self.heat.snapshot(),
             "trip": self.trip.snapshot(),
             "scale": self.scale.snapshot(),
             "charger": self.charger.snapshot(),

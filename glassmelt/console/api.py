@@ -103,6 +103,44 @@ class ConsoleAPI:
         reason = str(payload.get("reason", "控制台触发的窑温越限"))
         return self._guard(lambda: self.platform.trip_burner(zone, reason))
 
+    def zone_heat(self, payload: dict) -> dict:
+        """按分区测点读数闭环分配火力；读数缺区时该分区退回均分。"""
+
+        readings = payload.get("zone_temps_c")
+        if not isinstance(readings, dict):
+            raise ValueError("zone_temps_c 必须是分区到温度的映射")
+        total_load = float(payload.get("total_load", 0.8))
+        dt = float(payload.get("dt", 1.0))
+        return self._guard(
+            lambda: self.platform.allocate_zone_heat(readings, total_load, dt)
+        )
+
+    def equalize(self, payload: dict) -> dict:
+        total_load = float(payload.get("total_load", 0.8))
+        reason = str(payload.get("reason", "控制台触发的手动均分"))
+        return self._guard(
+            lambda: self.platform.equalize_zone_heat(total_load, reason)
+        )
+
+    def resume_zone_heat(self, payload: dict) -> dict:
+        """退出手动均分；需随请求送一拍当前分区测点读数。"""
+
+        readings = payload.get("zone_temps_c")
+        if not isinstance(readings, dict):
+            raise ValueError("zone_temps_c 必须是分区到温度的映射")
+        total_load = float(payload.get("total_load", 0.8))
+        dt = float(payload.get("dt", 1.0))
+        return self._guard(
+            lambda: self.platform.resume_zone_heat(readings, total_load, dt)
+        )
+
+    def set_zone_setpoints(self, payload: dict) -> dict:
+        setpoints = payload.get("setpoints_c")
+        if not isinstance(setpoints, dict):
+            raise ValueError("setpoints_c 必须是分区到目标温度的映射")
+        coerced = {zone: float(value) for zone, value in setpoints.items()}
+        return self._guard(lambda: self.platform.set_zone_setpoints(coerced))
+
     def rebuild_zone_map(self, payload: dict) -> dict:
         raw = payload.get("assignments")
         if not isinstance(raw, dict):
@@ -132,6 +170,7 @@ class ConsoleAPI:
             pull_rate=float(payload.get("pull_rate", 0.9)),
             gob_mass_g=float(payload.get("gob_mass_g", self.platform.config.feeder.gob_mass_target_g)),
             dt=float(payload.get("dt", 1.0)),
+            zone_temps_c=payload.get("zone_temps_c"),
         )
         return self._guard(lambda: self.platform.cycle(inputs))
 
