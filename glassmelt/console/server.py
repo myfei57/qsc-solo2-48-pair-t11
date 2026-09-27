@@ -84,6 +84,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(self.api.journal(segment=segment, limit=limit))
             elif parsed.path == "/api/readiness":
                 self._send_json(self.api.readiness())
+            elif parsed.path == "/api/burner/zone-heat":
+                self._send_json(self.api.zone_heat())
             elif parsed.path == "/":
                 self._send_html(render_page("overview", self.platform))
             elif parsed.path.strip("/") in PAGE_TITLES:
@@ -109,6 +111,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(self.api.reset_lehr(payload))
             elif parsed.path == "/api/burner/trip":
                 self._send_json(self.api.trip_burner(payload))
+            elif parsed.path == "/api/burner/zone-heat":
+                self._send_json(self.api.allocate_zone_heat(payload))
             elif parsed.path == "/api/furnace/rebuild":
                 self._send_json(self.api.rebuild_zone_map(payload))
             elif parsed.path == "/api/furnace/clear":

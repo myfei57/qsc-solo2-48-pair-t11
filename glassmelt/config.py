@@ -132,6 +132,62 @@ class BurnerLimits:
 
 
 @dataclass(frozen=True)
+class ZoneHeatLimits:
+    """分区火力反馈分配与测点可信度约束。"""
+
+    temp_plausible_margin_c: float
+    temp_max_rate_c_s: float
+    stuck_samples: int
+    fault_recover_samples: int
+    share_min: float
+    share_max: float
+    share_max_step: float
+    gain_p: float
+    gain_i: float
+    integral_trim_cap: float
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "ZoneHeatLimits":
+        limits = cls(
+            temp_plausible_margin_c=_number(section, "temp_plausible_margin_c", minimum=0.0),
+            temp_max_rate_c_s=_number(section, "temp_max_rate_c_s", minimum=0.0),
+            stuck_samples=int(_number(section, "stuck_samples", minimum=1.0)),
+            fault_recover_samples=int(_number(section, "fault_recover_samples", minimum=1.0)),
+            share_min=_number(section, "share_min", minimum=0.0),
+            share_max=_number(section, "share_max", minimum=0.0),
+            share_max_step=_number(section, "share_max_step", minimum=0.0),
+            gain_p=_number(section, "gain_p", minimum=0.0),
+            gain_i=_number(section, "gain_i", minimum=0.0),
+            integral_trim_cap=_number(section, "integral_trim_cap", minimum=0.0),
+        )
+        if limits.temp_plausible_margin_c <= 0:
+            raise ConfigError("测点可信温区余量必须为正", component="config")
+        if limits.temp_max_rate_c_s <= 0:
+            raise ConfigError("测点温度变化率上限必须为正", component="config")
+        if limits.share_min <= 0 or limits.share_max <= 0:
+            raise ConfigError("分区火力份额上下限必须为正", component="config")
+        if limits.share_min >= limits.share_max:
+            raise ConfigError("分区火力份额下限必须小于上限", component="config")
+        if limits.share_max_step <= 0:
+            raise ConfigError("分区火力单拍最大调整量必须为正", component="config")
+        if limits.gain_p <= 0 or limits.gain_i <= 0:
+            raise ConfigError("分区火力反馈比例与积分增益必须为正", component="config")
+        if limits.integral_trim_cap <= 0:
+            raise ConfigError("积分微调限幅必须为正", component="config")
+        return limits
+
+    def temp_plausible(self, temperature_c: float, target_c: float) -> bool:
+        """测点温度是否落在以目标值为中心的可信温区内。"""
+
+        return abs(float(temperature_c) - float(target_c)) <= self.temp_plausible_margin_c
+
+    def rate_ok(self, delta_c: float, dt: float) -> bool:
+        """温度变化量在本拍时长内是否不超过变化率上限。"""
+
+        return abs(float(delta_c)) <= self.temp_max_rate_c_s * max(0.0, float(dt))
+
+
+@dataclass(frozen=True)
 class ForehearthLimits:
     """供料道稳温与闸板约束。"""
 
@@ -326,6 +382,23 @@ class BatchLimits:
         return abs(float(deviation_pct)) <= self.mix_tolerance_pct
 
 
+def _default_zone_heat() -> "ZoneHeatLimits":
+    """分区火力反馈分配的内置默认约束，供旧配置缺段落时兜底。"""
+
+    return ZoneHeatLimits(
+        temp_plausible_margin_c=80.0,
+        temp_max_rate_c_s=5.0,
+        stuck_samples=12,
+        fault_recover_samples=3,
+        share_min=0.05,
+        share_max=0.30,
+        share_max_step=0.03,
+        gain_p=0.004,
+        gain_i=0.001,
+        integral_trim_cap=0.08,
+    )
+
+
 @dataclass(frozen=True)
 class PlatformConfig:
     """一份完整的平台配置。"""
@@ -341,6 +414,7 @@ class PlatformConfig:
     mold: MoldLimits
     lehr: LehrLimits
     batch: BatchLimits
+    zone_heat: ZoneHeatLimits = field(default_factory=_default_zone_heat)
     pages: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
@@ -376,6 +450,9 @@ class PlatformConfig:
             mold=MoldLimits.from_mapping(_section(limits, "mold")),
             lehr=LehrLimits.from_mapping(_section(limits, "lehr")),
             batch=BatchLimits.from_mapping(_section(limits, "batch")),
+            zone_heat=ZoneHeatLimits.from_mapping(limits["zone_heat"])
+            if limits.get("zone_heat") is not None
+            else _default_zone_heat(),
             pages=tuple(pages),
         )
 
@@ -451,6 +528,7 @@ def default_config() -> PlatformConfig:
             mix_tolerance_pct=1.5,
             charge_window_s=180.0,
         ),
+        zone_heat=_default_zone_heat(),
         pages=("overview", "operations", "records"),
     )
 
@@ -516,6 +594,18 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "scale_offset_max_kg": cfg.batch.scale_offset_max_kg,
                 "mix_tolerance_pct": cfg.batch.mix_tolerance_pct,
                 "charge_window_s": cfg.batch.charge_window_s,
+            },
+            "zone_heat": {
+                "temp_plausible_margin_c": cfg.zone_heat.temp_plausible_margin_c,
+                "temp_max_rate_c_s": cfg.zone_heat.temp_max_rate_c_s,
+                "stuck_samples": cfg.zone_heat.stuck_samples,
+                "fault_recover_samples": cfg.zone_heat.fault_recover_samples,
+                "share_min": cfg.zone_heat.share_min,
+                "share_max": cfg.zone_heat.share_max,
+                "share_max_step": cfg.zone_heat.share_max_step,
+                "gain_p": cfg.zone_heat.gain_p,
+                "gain_i": cfg.zone_heat.gain_i,
+                "integral_trim_cap": cfg.zone_heat.integral_trim_cap,
             },
         },
         "pages": list(cfg.pages),

@@ -62,6 +62,47 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _demo_zone_heat(platform: Platform) -> dict:
+    """演示分区火力反馈分配：断面温差调平、坏点退回均分、测点恢复。"""
+
+    target = platform.config.furnace.melt_temp_target_c
+    zones = platform.zones.zones()
+    # 断面温差：左侧欠火、右侧过热；zone-3 热电偶先给一个冻死值再恢复。
+    pattern = (-18.0, -10.0, 0.0, 4.0, 12.0, 20.0)
+    healthy = {zone: target + offset for zone, offset in zip(zones, pattern)}
+    steps = []
+    confirm = platform.config.zone_heat.fault_recover_samples + 1
+    for _ in range(confirm):
+        steps.append(
+            platform.allocate_zone_heat(
+                healthy, total_heat=platform.config.burner.gas_max_m3_h, dt=1.0
+            )
+        )
+    faulty = dict(healthy)
+    faulty["zone-3"] = -273.0
+    steps.append(
+        platform.allocate_zone_heat(
+            faulty, total_heat=platform.config.burner.gas_max_m3_h, dt=1.0
+        )
+    )
+    recovered_steps = 0
+    outcome = steps[-1]
+    for _ in range(platform.config.zone_heat.fault_recover_samples):
+        outcome = platform.allocate_zone_heat(
+            healthy, total_heat=platform.config.burner.gas_max_m3_h, dt=1.0
+        )
+        recovered_steps += 1
+        if outcome["fallback_count"] == 0:
+            break
+    steps.append(outcome)
+    return {
+        "healthy": steps[confirm - 1],
+        "faulty_sensor": steps[-2],
+        "recovered": steps[-1],
+        "recover_steps": recovered_steps,
+    }
+
+
 def _cmd_demo(args: argparse.Namespace) -> int:
     clock = ManualClock() if args.fast else SystemClock()
     config = load_config(args.config) if args.config else default_config()
@@ -98,6 +139,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     restored = platform.start_charging(path="resume")
     anneal_excursion = platform.evaluate_anneal(592.0)
     lehr_reset = platform.reset_lehr("演示用退火复位")
+    zone_heat_demo = _demo_zone_heat(platform)
     shutdown = platform.stop()
 
     server = ConsoleServer(platform)
@@ -119,6 +161,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "charged_after_clear": restored,
         "anneal_excursion": anneal_excursion,
         "lehr_reset": lehr_reset,
+        "zone_heat": zone_heat_demo,
         "shutdown": shutdown,
         "probe": probe,
         "audit": platform.audit.summary(),

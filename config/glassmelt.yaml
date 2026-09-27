@@ -47,6 +47,17 @@ limits:
     scale_offset_max_kg: 12.0
     mix_tolerance_pct: 1.5
     charge_window_s: 180.0
+  zone_heat:
+    temp_plausible_margin_c: 80.0
+    temp_max_rate_c_s: 5.0
+    stuck_samples: 12
+    fault_recover_samples: 3
+    share_min: 0.05
+    share_max: 0.30
+    share_max_step: 0.03
+    gain_p: 0.004
+    gain_i: 0.001
+    integral_trim_cap: 0.08
 pages:
   - overview
   - operations

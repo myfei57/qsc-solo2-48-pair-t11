@@ -74,6 +74,11 @@ class ConsoleAPI:
 
         return self.platform.readiness_report()
 
+    def zone_heat(self) -> dict:
+        """分区测点可信度与火力份额快照（操作台只读监视）。"""
+
+        return self.platform.zone_heat_report()
+
     def start_batch(self, payload: dict) -> dict:
         path = str(payload.get("path", "start"))
         return self._guard(lambda: self.platform.start_charging(path=path))
@@ -102,6 +107,27 @@ class ConsoleAPI:
         zone = str(payload.get("zone", "zone-3"))
         reason = str(payload.get("reason", "控制台触发的窑温越限"))
         return self._guard(lambda: self.platform.trip_burner(zone, reason))
+
+    def allocate_zone_heat(self, payload: dict) -> dict:
+        """按分区温度反馈分配火力；缺省按燃气上限做总热负荷预算。"""
+
+        raw_readings = payload.get("readings")
+        if not isinstance(raw_readings, dict):
+            raise ValueError("readings 必须是按分区名给出的测点温度映射")
+        readings: dict = {}
+        for zone in self.platform.zones.zones():
+            if zone not in raw_readings:
+                raise KeyError(f"缺少分区测点读数: {zone}")
+            readings[zone] = raw_readings[zone]
+        total_heat = payload.get("total_heat")
+        budget = None if total_heat is None else float(total_heat)
+        dt = float(payload.get("dt", 1.0))
+        setpoints = payload.get("setpoints_c")
+        if setpoints is not None and not isinstance(setpoints, dict):
+            raise ValueError("setpoints_c 必须是按分区名给出的温度给定映射")
+        return self._guard(
+            lambda: self.platform.allocate_zone_heat(readings, budget, dt, setpoints)
+        )
 
     def rebuild_zone_map(self, payload: dict) -> dict:
         raw = payload.get("assignments")

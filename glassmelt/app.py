@@ -18,7 +18,9 @@ from .batch.charge import Charger
 from .batch.scale import BatchScale
 from .burner.air import CombustionAir
 from .burner.draft import air_closed_before_draft_stop, close_combustion_air
+from .burner.heat import ZoneHeatAllocator
 from .burner.ignite import IgnitionUnit
+from .burner.sensors import ZoneSensors
 from .burner.zone import ZoneMap
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
@@ -146,6 +148,16 @@ class Platform:
         self.air = CombustionAir(self.clock, self.bus, self.config.burner)
         self.igniter = IgnitionUnit(self.bus, self.air, self.gas, self.config.burner)
         self.zones = ZoneMap(self.bus, self.config.burner)
+        self.zone_sensors = ZoneSensors(
+            self.clock, self.bus, self.zones.zones(), self.config.zone_heat
+        )
+        self.zone_heat = ZoneHeatAllocator(
+            self.clock,
+            self.bus,
+            self.zone_sensors,
+            self.config.zone_heat,
+            default_setpoint_c=self.config.furnace.melt_temp_target_c,
+        )
 
         self.scale = BatchScale(self.bus, store, self.config.batch)
         self.charger = Charger(self.bus, self.config.batch)
@@ -190,6 +202,8 @@ class Platform:
             ("burner", "air", "combustion-air-fan"),
             ("burner", "gas", "gas-control-valve"),
             ("burner", "zone", "zone-burner"),
+            ("burner", "zone_temp", "zone-thermocouple"),
+            ("burner", "zone_heat", "zone-heat-allocator"),
             ("forehearth", "steady", "forehearth-heater"),
             ("forehearth", "gate", "forehearth-gate"),
             ("temp", "anneal", "anneal-thermocouple"),
@@ -496,6 +510,30 @@ class Platform:
             revision = self.zones.rebuild(assignments, reason)
             return {"revision": revision, "zones": self.zones.describe()}
 
+    def allocate_zone_heat(
+        self,
+        readings: dict,
+        total_heat: float | None = None,
+        dt: float = 1.0,
+        setpoints_c: dict | None = None,
+    ) -> dict:
+        """按分区温度反馈分配火力：总热负荷封顶，坏点退回均分并标出。"""
+
+        budget = (
+            self.config.burner.gas_max_m3_h
+            if total_heat is None
+            else max(0.0, float(total_heat))
+        )
+        with self._lock:
+            outcome = self.zone_heat.allocate(readings, budget, dt, setpoints_c)
+            return outcome.as_dict()
+
+    def zone_heat_report(self) -> dict:
+        """分区测点可信度与火力份额快照。"""
+
+        with self._lock:
+            return self.zone_heat.snapshot()
+
     def trip_burner(self, zone: str, reason: str = "窑温越限") -> dict:
         """跳闸联动：按当前分区映射关断对应燃烧器。"""
 
@@ -632,6 +670,7 @@ class Platform:
                 "/api/batch/start",
                 "/api/burner/ignite",
                 "/api/burner/trip",
+                "/api/burner/zone-heat",
                 "/api/forehearth/gate",
                 "/api/mold/blow",
                 "/api/lehr/reset",
@@ -675,6 +714,7 @@ class Platform:
             "air": self.air.snapshot(),
             "ignition": self.igniter.snapshot(),
             "zones": self.zones.snapshot(),
+            "zone_heat": self.zone_heat.snapshot(),
             "trip": self.trip.snapshot(),
             "scale": self.scale.snapshot(),
             "charger": self.charger.snapshot(),
@@ -728,6 +768,7 @@ def build_platform(
             mold=effective.mold,
             lehr=effective.lehr,
             batch=effective.batch,
+            zone_heat=effective.zone_heat,
             pages=effective.pages,
         )
     return Platform(config=effective, clock=clock, unit=unit)
